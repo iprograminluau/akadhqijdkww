@@ -46,6 +46,7 @@ local CONFIG = {
     vmClick     = true,    -- click the centre of the screen on a loop from the moment we execute
     vmClickDelay = 8,      -- seconds between those centre clicks
     fpsBoost    = true,    -- strip the world for max FPS (everything returns on rejoin)
+    fpsStartDelay = 4,     -- seconds to wait after execute before fpsBoost touches anything
 
     ------------------------------------------------------------------ DISCORD WEBHOOK
     webhook     = true,    -- send a Discord report each server (before every hop) + on errors
@@ -1625,6 +1626,9 @@ local function startFpsBoost()
     fpsLoopId = fpsLoopId + 1
     local id = fpsLoopId
     task.spawn(function()
+        -- give the game a head start before we touch anything
+        task.wait(math.max(0, tonumber(st.fpsStartDelay) or 4))
+        if not (st.fpsBoost and fpsLoopId == id) then return end
         while st.fpsBoost and fpsLoopId == id and not fpsSafeToStart() do
             pcall(fpsClearFruitTrees)
             task.wait(1)
