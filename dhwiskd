@@ -6,9 +6,9 @@ local CONFIG = {
     ------------------------------------------------------------------ AUTO TAME
     autoTame        = true,    -- true = continuously tame matching wild pets
     autoHop         = true,   -- true = clear this server, then hop to a new one for more
-    hopDelay        = 18,       -- seconds to wait AFTER a successful tame before hopping (5-30, catches respawns)
+    hopDelay        = 15,       -- seconds to wait AFTER a successful tame before hopping (5-30, catches respawns)
     hopJitter       = 8,        -- + 0..N random extra seconds per hop so the fleet desyncs (0 = off)
-    emptyHopGrace   = 4,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
+    emptyHopGrace   = 10,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
     useFinder       = true,     -- hop STRAIGHT to a server that already has a wanted pet (WisHUB pet finder)
     finderPublicMix = 0.2,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
     finderRandomRarity = true,  -- pick ONE random rarity per fetch so every bot spreads to different servers
