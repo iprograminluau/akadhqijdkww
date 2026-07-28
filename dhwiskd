@@ -6,7 +6,7 @@ local CONFIG = {
     ------------------------------------------------------------------ AUTO TAME
     autoTame        = true,    -- true = continuously tame matching wild pets
     autoHop         = true,   -- true = clear this server, then hop to a new one for more
-    hopDelay        = 17,       -- seconds to wait AFTER a successful tame before hopping (5-30, catches respawns)
+    hopDelay        = 15,       -- seconds to wait AFTER a successful tame before hopping (5-30, catches respawns)
     hopJitter       = 8,        -- + 0..N random extra seconds per hop so the fleet desyncs (0 = off)
     emptyHopGrace   = 10,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
     useFinder       = true,     -- hop STRAIGHT to a server that already has a wanted pet (WisHUB pet finder)
@@ -118,7 +118,9 @@ end
 
 -- ── VM centre-click loop ─────────────────────────────────────────────────────
 -- Clicks the middle of the screen every vmClickDelay seconds, starting the moment the
--- script executes and never stopping. Purely additive to skipLoadingScreen below.
+-- script executes and never stopping. Purely additive to skipLoadingScreen below: on
+-- executors where VirtualInputManager works this alone dismisses "Click to skip!", and
+-- where VIM is a no-op it costs nothing.
 task.spawn(function()
     while true do
         if st.vmClick then
@@ -903,6 +905,8 @@ local function dismissTeleportError()
 end
 
 -- ---------- recently-visited servers (survives a hop) ----------
+-- The Lua VM dies on every teleport, so "which servers did I just come from" has to
+-- live on disk. Without this the bot happily bounces A -> B -> A.
 local RECENT_FILE = "wishub_gag2_recent.json"
 local RECENT_MAX = 25
 local RECENT_TTL = 900
@@ -963,6 +967,8 @@ end
 markVisited(game.JobId)
 
 -- ---------- WisHUB Pet Finder (targeted hop) ----------
+-- Endpoint returns a flat array, one row per (pet, server):
+-- {pet_name, rarity, job_id, players, max_players, expires_at(unix), ...}
 local PetRarityByName = {
     Bunny = "Common", Frog = "Common",
     Owl = "Uncommon",
@@ -980,8 +986,9 @@ local function finderRequestFn()
         or (fluxus and fluxus.request) or (http and http.request) or http_request or request
 end
 
--- Pick ONE random rarity per fetch (Common .. Super). Each bot asks a different
--- question every hop, so a co-launched fleet spreads instead of stacking.
+-- Pick ONE random rarity per fetch (Common .. Super). Each bot therefore asks a
+-- different question every hop, so a co-launched fleet spreads instead of all
+-- stacking onto the same "best" server. finderRarities still narrows the pool.
 local function finderPetNames()
     local pool = {}
     local want = st.finderRarities
@@ -1044,8 +1051,8 @@ local function finderFetch()
     return decoded, pickedRarity
 end
 
--- Newest reports first (largest time left = written most recently), trimmed to
--- finderFreshTop, then shuffled. One HTTP call.
+-- Return up to `count` job_ids: newest reports first (largest time left = the report
+-- the finder just wrote), trimmed to finderFreshTop, then shuffled. One HTTP call.
 local function finderPickJobs(count)
     count = math.max(1, math.floor(tonumber(count) or 1))
     local pets, pickedRarity = finderFetch()
@@ -1133,15 +1140,9 @@ local function fetchHopServers(allowRecent)
     return list
 end
 
-local function doTeleport(pid, job)
-    local ok = pcall(function()
-        TeleportService:TeleportToPlaceInstance(pid, job, LocalPlayer)
-    end)
-    if not ok then
-        pcall(function() TeleportService:TeleportToPlaceInstance(pid, job) end)
-    end
-end
-
+-- Build the hop queue: finder and public interleaved 2:1 (F F P F F P ...) so a dead
+-- finder entry is followed quickly by a plain public server instead of 10 more finder
+-- entries from the same possibly-stale batch.
 local function buildJobList()
     local jobs, seen = {}, {}
     local function add(j)
@@ -1239,7 +1240,7 @@ local function serverHop()
             teleportFailed = false
             teleportFailResult = nil
             markVisited(job)
-            doTeleport(pid, job)
+            pcall(function() TeleportService:TeleportToPlaceInstance(pid, job, LocalPlayer) end)
 
             local t0 = os.clock()
             while not teleportFailed and os.clock() - t0 < 12 do
@@ -1358,94 +1359,8 @@ task.spawn(function()
     end
 end)
 
-local fpsPlatform = nil
-local fpsPlatformConn = nil
+local fpsPlatform = nil   -- kept only so fpsProtected's check stays valid
 local fpsLoopId = 0
-local fpsFloorY = nil
-local fpsFeetOffset = 3
-
-local function fpsKeepSet()
-    local keep = {}
-    local m = workspace:FindFirstChild("Map")
-    if m then
-        for _, n in ipairs({ "WildPetSpawns", "WildPetRef", "PetSpawn" }) do
-            local inst = m:FindFirstChild(n)
-            if inst then keep[inst] = true end
-        end
-    end
-    local bp = workspace:FindFirstChild("Baseplate")
-    if bp then
-        local top = bp:FindFirstChild("TopLayer")
-        if top then keep[top] = true end
-    end
-    for _, pl in ipairs(Players:GetPlayers()) do
-        if pl.Character then keep[pl.Character] = true end
-    end
-    if fpsPlatform then keep[fpsPlatform] = true end
-    return keep
-end
-
--- Anything named WildPet* (or holding a WildPet* folder) is off limits: the keep-set is
--- a snapshot and the folders may not exist yet on the first pass.
-local function isPetRelated(inst)
-    if not inst then return false end
-    if tostring(inst.Name):find("WildPet", 1, true) then return true end
-    local ok, found = pcall(function()
-        return inst:FindFirstChild("WildPetSpawns", true)
-            or inst:FindFirstChild("WildPetRef", true)
-    end)
-    if ok and found then return true end
-    return false
-end
-
-local function fpsClearWorld()
-    local keep = fpsKeepSet()
-    for _, c in ipairs(workspace:GetChildren()) do
-        if keep[c] or c:IsA("Camera") or isPetRelated(c) then
-        elseif c:IsA("Terrain") then
-            pcall(function() c:Clear() end)
-        elseif c.Name == "Map" or c.Name == "Baseplate" then
-            for _, mc in ipairs(c:GetChildren()) do
-                if not keep[mc] and not isPetRelated(mc) then
-                    pcall(function() mc:Destroy() end)
-                end
-            end
-        elseif c:IsA("BasePart") or c:IsA("Model") or c:IsA("Folder") or c:IsA("UnionOperation") or c:IsA("MeshPart") then
-            pcall(function() c:Destroy() end)
-        end
-    end
-end
-
-local function ensureFpsPlatform()
-    if not (fpsPlatform and fpsPlatform.Parent) then
-        local p = Instance.new("Part")
-        p.Name = "WisHubFloor"
-        p.Size = Vector3.new(120, 2, 120)
-        p.Anchored = true
-        p.CanCollide = true
-        p.Transparency = 1
-        p.Parent = workspace
-        fpsPlatform = p
-    end
-    fpsFloorY = nil
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if char and root then
-        local ok, cf, size = pcall(function() return char:GetBoundingBox() end)
-        if ok and cf and size then fpsFeetOffset = root.Position.Y - (cf.Position.Y - size.Y / 2) end
-        fpsFloorY = root.Position.Y - fpsFeetOffset
-        fpsPlatform.Position = Vector3.new(root.Position.X, fpsFloorY - (fpsPlatform.Size.Y / 2), root.Position.Z)
-    end
-    if fpsPlatformConn then fpsPlatformConn:Disconnect() end
-    fpsPlatformConn = RunService.Heartbeat:Connect(function()
-        if not st.fpsBoost then return end
-        local r = hrp()
-        if not (r and fpsPlatform and fpsPlatform.Parent) then return end
-        local feetY = r.Position.Y - fpsFeetOffset
-        if fpsFloorY == nil or feetY < fpsFloorY - 0.5 then fpsFloorY = feetY end
-        fpsPlatform.Position = Vector3.new(r.Position.X, fpsFloorY - (fpsPlatform.Size.Y / 2), r.Position.Z)
-    end)
-end
 
 local function fpsSafeToStart()
     if LocalPlayer:GetAttribute("LoadingScreenDone") ~= true then return false end
@@ -1517,61 +1432,47 @@ local function fpsProtected(desc)
     return false
 end
 
-local function superBrutalize(desc)
+-- Non-destructive pass. We used to Destroy() most of workspace, which fires a
+-- DescendantRemoving storm while the character is still spawning -- that is what made
+-- the avatar load badly. Now we only strip the RENDER cost and leave the instances in
+-- place: no removals, no churn. Only Plants/Fruits are still deleted (fpsClearFruitTrees).
+local function fpsSoften(desc)
     if fpsProtected(desc) then return end
-    if desc:IsA("ParticleEmitter") or desc:IsA("Beam") or desc:IsA("Trail") or desc:IsA("Fire")
-        or desc:IsA("Smoke") or desc:IsA("Sparkles") or desc:IsA("Light") or desc:IsA("PostEffect")
-        or desc:IsA("Texture") or desc:IsA("Decal") or desc:IsA("SurfaceAppearance")
-        or desc:IsA("Attachment") or desc:IsA("SpecialMesh") or desc:IsA("Motor6D")
-        or desc:IsA("Animator") or desc:IsA("AnimationController") then
-        pcall(function() desc:Destroy() end)
+
+    if desc:IsA("ParticleEmitter") or desc:IsA("Trail") or desc:IsA("Beam")
+        or desc:IsA("Fire") or desc:IsA("Smoke") or desc:IsA("Sparkles")
+        or desc:IsA("Light") then
+        pcall(function() desc.Enabled = false end)
         return
     end
-    local n = string.lower(desc.Name)
-    if n:match("track") or n:match("trace") or n:match("arrow") or n:match("guide")
-        or n:match("pointer") or n:match("waypoint") or n:match("highlight") then
-        pcall(function() desc:Destroy() end)
+    if desc:IsA("Decal") or desc:IsA("Texture") then
+        pcall(function() desc.Transparency = 1 end)
         return
     end
-    if desc:IsA("PVAdornment") or desc:IsA("HandleAdornment") or desc:IsA("SurfaceGui") then
-        pcall(function() desc:Destroy() end)
+    if desc:IsA("SurfaceGui") or desc:IsA("PVAdornment") or desc:IsA("HandleAdornment") then
+        pcall(function() desc.Enabled = false end)
         return
     end
     if desc:IsA("BillboardGui") and desc.Name ~= "FruitESP" then
-        pcall(function() desc:Destroy() end)
+        pcall(function() desc.Enabled = false end)
         return
     end
     if desc:IsA("BasePart") then
-        local parentModel = desc:FindFirstAncestorWhichIsA("Model")
-        if parentModel and string.lower(parentModel.Name):match("sprinkler") then
-            if desc.Size.X > 5 or desc.Size.Z > 5 then pcall(function() desc:Destroy() end) return end
-            if desc.Transparency > 0 then pcall(function() desc:Destroy() end) return end
-        end
-        if n:match("range") or n:match("radius") or n:match("area") or n:match("ring")
-            or n:match("effect") or n:match("zone") or n:match("indicator") or n:match("visual") then
-            pcall(function() desc:Destroy() end)
-            return
-        end
-        desc.CastShadow = false
-        local isFruit, isPlant = getParentType(desc)
-        if desc.Name == "HarvestPart" then
-            desc.Transparency = 1
-        elseif isFruit then
-            desc.Transparency = 1
-            desc.CanCollide = false
-            if desc:IsA("MeshPart") then pcall(function() desc.TextureID = "" end) end
+        pcall(function()
+            desc.CastShadow = false
             desc.Material = Enum.Material.SmoothPlastic
             desc.Reflectance = 0
-        elseif isPlant then
-            if desc.Name ~= "Base" then
-                desc.Transparency = 1
-                desc.CanCollide = false
-            end
-            desc.Anchored = true
-        else
-            desc.Material = Enum.Material.SmoothPlastic
-            desc.Reflectance = 0
+        end)
+        if desc:IsA("MeshPart") then
+            pcall(function() desc.TextureID = "" end)
         end
+        return
+    end
+end
+
+local function fpsFlattenWorld()
+    for _, desc in ipairs(workspace:GetDescendants()) do
+        pcall(fpsSoften, desc)
     end
 end
 
@@ -1606,20 +1507,36 @@ local function optimizeWorld()
         end
     end)
     nukeEnvironment()
-    for _, desc in ipairs(workspace:GetDescendants()) do
-        pcall(superBrutalize, desc)
-    end
+    fpsFlattenWorld()
 end
+
+-- New instances are QUEUED, not handled one-by-one. A task.defer per descendant was
+-- thousands of scheduled callbacks during a garden load; we now drain a batch every
+-- 0.4s with a hard cap per cycle so the scheduler never gets buried.
+local softenQueue = {}
+local softenQueueN = 0
 
 workspace.DescendantAdded:Connect(function(desc)
     if not (st.fpsBoost and fpsGameplayActive) then return end
-    local char = LocalPlayer.Character
-    if char and desc:IsDescendantOf(char) then return end
-    task.defer(function()
-        if st.fpsBoost and fpsGameplayActive and desc and desc.Parent then
-            pcall(superBrutalize, desc)
+    if softenQueueN > 4000 then return end
+    softenQueueN = softenQueueN + 1
+    softenQueue[softenQueueN] = desc
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(0.4)
+        if st.fpsBoost and fpsGameplayActive and softenQueueN > 0 then
+            local batch = softenQueue
+            softenQueue, softenQueueN = {}, 0
+            local done = 0
+            for _, desc in ipairs(batch) do
+                if desc and desc.Parent then pcall(fpsSoften, desc) end
+                done = done + 1
+                if done % 150 == 0 then task.wait() end
+            end
         end
-    end)
+    end
 end)
 
 local function startFpsBoost()
@@ -1635,13 +1552,10 @@ local function startFpsBoost()
         end
         if not (st.fpsBoost and fpsLoopId == id) then return end
         fpsGameplayActive = true
-        ensureFpsPlatform()
-        pcall(fpsClearWorld)
         pcall(optimizeWorld)
         while st.fpsBoost and fpsLoopId == id do
             task.wait(2)
             pcall(fpsClearFruitTrees)
-            if st.fpsBoost and fpsSafeToStart() then pcall(fpsClearWorld) end
         end
         fpsGameplayActive = false
     end)
