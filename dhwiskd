@@ -12,7 +12,7 @@ local CONFIG = {
     useFinder       = true,     -- hop STRAIGHT to a server that already has a wanted pet (WisHUB pet finder)
     finderPublicMix = 5,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
     finderRarities  = {},       -- which rarities to chase via the finder. {} = all. e.g. {"Legendary","Mythic","Super"}
-    finderMinRarity = "Rare",
+    finderMinRarity = "Legendary",
     finderToken     = "6d35e00d087f9b53de54381a82a5e5c52e9c93088bf0bde9",  -- pet-finder read token (Bearer)
     tameRarities    = {},      -- only these rarities, e.g. {"Legendary","Mythic","Super"}.  {} = any
     tameNames       = {},      -- only these species, e.g. {"Raccoon","Dragonfly"}.          {} = any
